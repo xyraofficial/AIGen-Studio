@@ -28,21 +28,21 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
     try {
       if (mode === 'signup') {
-        const { error } = await supabase.auth.signUp({
+        const { error } = await (supabase.auth as any).signUp({
           email,
           password,
         });
         if (error) throw error;
         setMessage('Check your email for the confirmation link!');
       } else if (mode === 'login') {
-        const { error } = await supabase.auth.signInWithPassword({
+        const { error } = await (supabase.auth as any).signInWithPassword({
           email,
           password,
         });
         if (error) throw error;
         onClose();
       } else if (mode === 'reset') {
-        const { error } = await supabase.auth.resetPasswordForEmail(email);
+        const { error } = await (supabase.auth as any).resetPasswordForEmail(email);
         if (error) throw error;
         setMessage('Check your email for the password reset link.');
       }

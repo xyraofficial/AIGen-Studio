@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState } from 'react';
 import { supabase, supabaseAdmin } from '../lib/supabase';
 import { UserProfile } from '../types';
@@ -122,7 +123,8 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
       try {
          // --- SUPER ADMIN DELETE (FULL WIPE) ---
          // 1. Delete Auth User (This is what removes the login)
-         const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
+         // Cast to any because TS definitions for admin might be missing or different version
+         const { error: authError } = await (supabaseAdmin.auth as any).admin.deleteUser(userId);
          
          if (authError) {
              console.error("Auth delete error:", authError);

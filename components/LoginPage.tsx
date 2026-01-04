@@ -20,7 +20,7 @@ const LoginPage: React.FC = () => {
 
     try {
       if (mode === 'signup') {
-        const { error } = await supabase.auth.signUp({
+        const { error } = await (supabase.auth as any).signUp({
           email,
           password,
         });
@@ -28,7 +28,7 @@ const LoginPage: React.FC = () => {
         setMessage('Confirmation email sent! Please check your inbox.');
         setMode('login'); // Switch to login after signup attempt
       } else {
-        const { error } = await supabase.auth.signInWithPassword({
+        const { error } = await (supabase.auth as any).signInWithPassword({
           email,
           password,
         });
