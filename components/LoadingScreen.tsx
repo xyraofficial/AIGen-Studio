@@ -17,7 +17,7 @@ const LoadingScreen: React.FC = () => {
             </div>
             
             <div className="flex flex-col items-center gap-2">
-                <h2 className="text-lg font-bold tracking-widest uppercase text-gray-200">Syncing Profile</h2>
+                <h2 className="text-lg font-bold tracking-widest uppercase text-gray-200">Initializing Studio</h2>
                 <div className="flex gap-1">
                     <span className="w-1.5 h-1.5 bg-gray-600 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
                     <span className="w-1.5 h-1.5 bg-gray-600 rounded-full animate-bounce [animation-delay:-0.15s]"></span>

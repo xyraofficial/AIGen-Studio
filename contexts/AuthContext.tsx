@@ -40,7 +40,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             avatar_url: null,
         };
 
-        // 1. Attempt with Email
         if (email) {
             const { data: withEmailData, error: withEmailError } = await supabase
                 .from('profiles')
@@ -54,7 +53,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
         }
 
-        // 2. Retry without Email (Fallback)
         const { data: noEmailData } = await supabase
             .from('profiles')
             .insert([baseProfile])
@@ -66,8 +64,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
       } else if (data) {
-        // Profile exists. 
-        // Sync email silently if needed
         if (email && data.email !== email) {
              supabase.from('profiles').update({ email }).eq('id', userId).then(() => {});
         }
@@ -87,8 +83,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     let mounted = true;
+    
+    // Safety fallback: If supabase takes too long, just unlock the app.
+    // This prevents "Syncing Profile" from getting stuck forever.
+    const safetyTimer = setTimeout(() => {
+        if (mounted && loading) {
+            console.warn("Auth initialization timed out, forcing unlock.");
+            setLoading(false);
+        }
+    }, 2000);
 
-    // 1. Initial Session Check (Instant)
     const initAuth = async () => {
       try {
         const { data: { session: initialSession } } = await (supabase.auth as any).getSession();
@@ -97,7 +101,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (initialSession) {
              setSession(initialSession);
              currentUserId.current = initialSession.user.id;
-             // Background Fetch - Do NOT await this, let UI render immediately
+             // Non-blocking fetch
              fetchProfile(initialSession.user.id, initialSession.user.email);
           }
         }
@@ -105,25 +109,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.error("Auth init error:", error);
       } finally {
         if (mounted) {
-            // IMMEDIATE UNLOCK: No timeouts, no delays.
             setLoading(false);
+            clearTimeout(safetyTimer);
         }
       }
     };
 
     initAuth();
 
-    // 2. Listen for Auth Changes
     const { data: { subscription } } = (supabase.auth as any).onAuthStateChange(async (event: string, newSession: any) => {
       if (!mounted) return;
 
       setSession(newSession);
       
       if (newSession) {
-         // If user changed, or if we haven't fetched profile for this user yet
          if (currentUserId.current !== newSession.user.id) {
              currentUserId.current = newSession.user.id;
-             // Background fetch only
              fetchProfile(newSession.user.id, newSession.user.email);
          }
       } else {
@@ -131,18 +132,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         currentUserId.current = null;
       }
       
-      // Ensure loading is false on any auth change to prevent getting stuck
       setLoading(false);
     });
 
     return () => {
       mounted = false;
+      clearTimeout(safetyTimer);
       subscription.unsubscribe();
     };
   }, []);
 
   const refreshProfile = async () => {
-    // This is the "Important Sync" - explicit refreshes wait for data
     if (session) {
         await fetchProfile(session.user.id, session.user.email);
     }
