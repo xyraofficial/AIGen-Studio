@@ -7,9 +7,9 @@ import { UserRole } from '../types';
 // Single Gemini Free Key ~ 15 RPM. 
 // 4 Keys ~ 60 RPM Global Capacity.
 
-const TIME_WINDOW_MINUTES = 1; 
+export const TIME_WINDOW_MINUTES = 1; 
 
-const GLOBAL_LIMIT = 60; // Max 60 requests per minute globally (Utilization of 4 keys)
+export const GLOBAL_LIMIT = 60; // Max 60 requests per minute globally (Utilization of 4 keys)
 export const USER_LIMIT = 20;   // Max 20 requests per minute per user (Comfortable chatting speed)
 
 export const checkRateLimits = async (userId: string, role: UserRole): Promise<{ allowed: boolean; reason?: string }> => {
@@ -58,6 +58,17 @@ export const getUsageStats = async (userId: string) => {
     .from('chat_logs')
     .select('*', { count: 'exact', head: true })
     .eq('user_id', userId)
+    .gte('created_at', timeWindowStart);
+
+    return count || 0;
+}
+
+export const getGlobalUsageStats = async () => {
+    const timeWindowStart = new Date(Date.now() - TIME_WINDOW_MINUTES * 60 * 1000).toISOString();
+    
+    const { count } = await supabase
+    .from('chat_logs')
+    .select('*', { count: 'exact', head: true })
     .gte('created_at', timeWindowStart);
 
     return count || 0;

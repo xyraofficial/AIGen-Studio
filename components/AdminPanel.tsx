@@ -3,7 +3,8 @@ import React, { useEffect, useState } from 'react';
 import { supabase, supabaseAdmin } from '../lib/supabase';
 import { UserProfile } from '../types';
 import { useAuth } from '../contexts/AuthContext';
-import { X, Shield, Users, Activity, Search, Edit2, Trash2, Check, Loader2, AlertCircle, Database, Copy, Lock, Unlock, Settings, Terminal, ShieldCheck } from 'lucide-react';
+import { getGlobalUsageStats, GLOBAL_LIMIT } from '../services/rateLimitService';
+import { X, Shield, Users, Activity, Search, Edit2, Trash2, Check, Loader2, AlertCircle, Database, Copy, Lock, Unlock, Settings, Terminal, ShieldCheck, Zap, BarChart3, RefreshCw } from 'lucide-react';
 
 interface AdminPanelProps {
   isOpen: boolean;
@@ -14,7 +15,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
   const { session } = useAuth(); // Access current session
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [totalLogs, setTotalLogs] = useState(0);
+  const [globalUsage, setGlobalUsage] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   
   // Edit State
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -31,14 +34,33 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
   useEffect(() => {
     if (isOpen) {
         fetchData();
+        // Auto-refresh stats every 10 seconds while open
+        const interval = setInterval(refreshStats, 10000);
+        return () => clearInterval(interval);
     }
   }, [isOpen]);
+
+  const refreshStats = async () => {
+      setRefreshing(true);
+      const currentUsage = await getGlobalUsageStats();
+      setGlobalUsage(currentUsage);
+      
+      // Fetch total activity count (last 24h)
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { count } = await supabase
+        .from('chat_logs')
+        .select('*', { count: 'exact', head: true })
+        .gte('created_at', yesterday);
+      setTotalLogs(count || 0);
+      
+      setRefreshing(false);
+  };
 
   const fetchData = async () => {
     setLoading(true);
     setMissingEmailColumn(false);
 
-    // Fetch users
+    // 1. Fetch Users
     const { data: profiles, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
     
     if (error) {
@@ -57,14 +79,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
         }
     }
 
-    // Fetch total activity count (last 24h)
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { count } = await supabase
-        .from('chat_logs')
-        .select('*', { count: 'exact', head: true })
-        .gte('created_at', yesterday);
+    // 2. Fetch Analytics
+    await refreshStats();
     
-    setTotalLogs(count || 0);
     setLoading(false);
   };
 
@@ -161,6 +178,11 @@ ADD CONSTRAINT profiles_id_fkey
     REFERENCES auth.users (id)
     ON DELETE CASCADE;`;
 
+  // Calculate usage percentage
+  const usagePercentage = Math.min((globalUsage / GLOBAL_LIMIT) * 100, 100);
+  const usageColor = usagePercentage > 80 ? 'bg-red-500' : usagePercentage > 50 ? 'bg-yellow-500' : 'bg-green-500';
+  const usageTextColor = usagePercentage > 80 ? 'text-red-400' : usagePercentage > 50 ? 'text-yellow-400' : 'text-green-400';
+
   if (!isOpen) return null;
 
   return (
@@ -205,7 +227,13 @@ ADD CONSTRAINT profiles_id_fkey
                 </span>
             </div>
             <div className="flex items-center gap-2">
-                
+                <button 
+                    onClick={refreshStats}
+                    className="p-2 text-gray-500 hover:text-blue-400 hover:bg-gray-800 rounded-lg transition-colors"
+                    title="Refresh Data"
+                >
+                    <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
+                </button>
                 <button 
                     onClick={() => setShowConfig(true)}
                     className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/30 hover:bg-purple-500/20 text-xs font-medium transition-colors"
@@ -229,20 +257,45 @@ ADD CONSTRAINT profiles_id_fkey
                     </div>
                     <div className="text-lg md:text-2xl font-bold text-white">{users.length}</div>
                 </div>
+                
                 <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
                     <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1 flex items-center gap-2">
-                        <Activity size={12} /> 24h Requests
+                        <Activity size={12} /> 24h Activity
                     </div>
                     <div className="text-lg md:text-2xl font-bold text-blue-400">{totalLogs}</div>
                 </div>
-                 <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
-                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1">Global Limit</div>
-                    <div className="text-lg md:text-2xl font-bold text-green-400">60 <span className="text-xs text-gray-500 font-normal">/ 10m</span></div>
+
+                {/* Real-time Rate Limit Card */}
+                 <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800 relative overflow-hidden group">
+                    <div className="flex justify-between items-center mb-1 relative z-10">
+                        <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase flex items-center gap-2">
+                             <Zap size={12} className={usagePercentage > 80 ? "text-red-500" : "text-yellow-500"} /> Global Load
+                        </div>
+                        <span className="text-[9px] text-gray-500 font-mono">1m window</span>
+                    </div>
+                    
+                    <div className={`text-lg md:text-2xl font-bold relative z-10 ${usageTextColor}`}>
+                        {globalUsage} <span className="text-sm text-gray-600 font-normal">/ {GLOBAL_LIMIT}</span>
+                    </div>
+                    
+                    {/* Progress Bar Background */}
+                    <div className="absolute bottom-0 left-0 h-1 bg-gray-700 w-full">
+                        <div 
+                            className={`h-full ${usageColor} transition-all duration-500 ease-out`} 
+                            style={{ width: `${usagePercentage}%` }}
+                        ></div>
+                    </div>
                 </div>
+
                  <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
-                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1">Mode</div>
-                    <div className={`text-xs md:text-sm font-bold px-2 py-1 rounded inline-block whitespace-nowrap text-yellow-400 bg-yellow-900/20`}>
-                        Super Admin
+                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1 flex items-center gap-2">
+                        <BarChart3 size={12} /> System Status
+                    </div>
+                    <div className="flex items-center gap-2 mt-1">
+                        <div className={`w-2.5 h-2.5 rounded-full ${usagePercentage >= 100 ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></div>
+                        <div className={`text-xs md:text-sm font-bold ${usagePercentage >= 100 ? 'text-red-400' : 'text-green-400'}`}>
+                            {usagePercentage >= 100 ? 'OVERLOAD' : 'OPERATIONAL'}
+                        </div>
                     </div>
                 </div>
             </div>
