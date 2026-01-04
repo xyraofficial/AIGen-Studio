@@ -9,13 +9,43 @@ const API_KEYS = [
   "AIzaSyC5V3qs13daQw9xr8HSL48LC1XTvjcfMnM"
 ];
 
+// Simple in-memory health tracker for the admin panel
+// status: 'operational' | 'limited' | 'error'
+const keyHealth = new Map<number, { status: string; lastUsed: number; errors: number }>();
+
+// Initialize health map
+API_KEYS.forEach((_, idx) => {
+    keyHealth.set(idx, { status: 'operational', lastUsed: 0, errors: 0 });
+});
+
+export const getKeyStatus = () => {
+    return API_KEYS.map((key, index) => {
+        const health = keyHealth.get(index) || { status: 'operational', lastUsed: 0, errors: 0 };
+        // Mask the key for display
+        const masked = `${key.substring(0, 4)}...${key.substring(key.length - 4)}`;
+        return {
+            index,
+            key: masked,
+            ...health
+        };
+    });
+};
+
+const updateKeyHealth = (index: number, status: 'operational' | 'limited' | 'error') => {
+    const current = keyHealth.get(index) || { status: 'operational', lastUsed: 0, errors: 0 };
+    keyHealth.set(index, {
+        status,
+        lastUsed: Date.now(),
+        errors: status !== 'operational' ? current.errors + 1 : current.errors
+    });
+};
+
 // Helper to safely get an environment variable or fallback to the pool
 const getApiKey = (index: number): string => {
   // Try process.env first (if configured in Vite/Cloudflare)
   if (typeof process !== 'undefined' && process.env?.API_KEY) {
     return process.env.API_KEY;
   }
-  // Fallback to the hardcoded pool
   return API_KEYS[index % API_KEYS.length];
 };
 
@@ -52,6 +82,8 @@ export const streamChatResponse = async function* (
     const currentKey = getApiKey(i);
     
     try {
+      updateKeyHealth(i, 'operational'); // Mark attempted use
+      
       const ai = new GoogleGenAI({ apiKey: currentKey });
 
       // Filter out error messages from history
@@ -92,9 +124,11 @@ export const streamChatResponse = async function* (
       // Only retry if it's a rate limit issue
       if (isRetryableError(error)) {
         console.warn(`Key ${i + 1}/${API_KEYS.length} exhausted. Switching to next key...`);
+        updateKeyHealth(i, 'limited');
         continue;
       }
       
+      updateKeyHealth(i, 'error');
       // If it's a different error (e.g., bad request), throw immediately
       throw error;
     }
@@ -141,6 +175,7 @@ export const streamBuilderResponse = async function* (
     const currentKey = getApiKey(i);
 
     try {
+      updateKeyHealth(i, 'operational');
       const ai = new GoogleGenAI({ apiKey: currentKey });
 
       const result = await ai.models.generateContentStream({
@@ -167,8 +202,10 @@ export const streamBuilderResponse = async function* (
 
       if (isRetryableError(error)) {
         console.warn(`Builder: Key ${i + 1}/${API_KEYS.length} exhausted. Switching...`);
+        updateKeyHealth(i, 'limited');
         continue; 
       }
+      updateKeyHealth(i, 'error');
       throw error;
     }
   }

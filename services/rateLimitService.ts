@@ -1,5 +1,5 @@
 
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseAdmin } from '../lib/supabase';
 import { UserRole } from '../types';
 
 // RATE LIMIT CONFIGURATION
@@ -73,3 +73,35 @@ export const getGlobalUsageStats = async () => {
 
     return count || 0;
 }
+
+export const getActivityLogs = async (limit = 50) => {
+    // We use supabaseAdmin to join with profiles easily without RLS complexity on reading other users
+    // Note: Supabase JS doesn't support complex joins easily without foreign keys setup in specific ways.
+    // For simplicity, we'll fetch logs then fetch user info.
+    
+    const { data: logs, error } = await supabaseAdmin
+        .from('chat_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+    if (error) return [];
+
+    // Get unique user IDs from logs
+    const userIds = [...new Set(logs.map(log => log.user_id))];
+
+    // Fetch user details
+    const { data: users } = await supabaseAdmin
+        .from('profiles')
+        .select('id, username, email, role')
+        .in('id', userIds);
+
+    const userMap = new Map();
+    users?.forEach(u => userMap.set(u.id, u));
+
+    return logs.map(log => ({
+        id: log.id,
+        created_at: log.created_at,
+        user: userMap.get(log.user_id) || { username: 'Unknown', email: 'N/A' }
+    }));
+};

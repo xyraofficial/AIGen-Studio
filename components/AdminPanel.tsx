@@ -1,58 +1,67 @@
-
 import React, { useEffect, useState } from 'react';
 import { supabase, supabaseAdmin } from '../lib/supabase';
 import { UserProfile } from '../types';
 import { useAuth } from '../contexts/AuthContext';
-import { getGlobalUsageStats, GLOBAL_LIMIT } from '../services/rateLimitService';
-import { X, Shield, Users, Activity, Search, Edit2, Trash2, Check, Loader2, AlertCircle, Database, Copy, Lock, Unlock, Settings, Terminal, ShieldCheck, Zap, BarChart3, RefreshCw } from 'lucide-react';
+import { getGlobalUsageStats, getActivityLogs, GLOBAL_LIMIT } from '../services/rateLimitService';
+import { getKeyStatus } from '../services/geminiService';
+import { X, Shield, Users, Activity, Search, Edit2, Trash2, Check, Loader2, AlertCircle, Database, Copy, Settings, Terminal, ShieldCheck, Zap, BarChart3, RefreshCw, Server, List, Key } from 'lucide-react';
 
 interface AdminPanelProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+type TabType = 'overview' | 'api_health' | 'live_logs';
+
 const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
-  const { session } = useAuth(); // Access current session
+  const { session } = useAuth();
+  const [activeTab, setActiveTab] = useState<TabType>('overview');
+  const [refreshing, setRefreshing] = useState(false);
+
+  // DATA STATES
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [keyStatus, setKeyStatus] = useState<any[]>([]);
+  
+  // STATS STATES
   const [totalLogs, setTotalLogs] = useState(0);
   const [globalUsage, setGlobalUsage] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  
-  // Edit State
+
+  // EDIT STATE
   const [editingId, setEditingId] = useState<string | null>(null);
   const [tempRole, setTempRole] = useState<'user' | 'admin'>('user');
-  const [actionLoading, setActionLoading] = useState<string | null>(null); // Stores ID of item being processed
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  // Configuration Modal State
+  // UTILS
   const [showConfig, setShowConfig] = useState(false);
-
-  // DB Health State
   const [missingEmailColumn, setMissingEmailColumn] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
         fetchData();
-        // Auto-refresh stats every 10 seconds while open
-        const interval = setInterval(refreshStats, 10000);
+        const interval = setInterval(refreshStats, 5000); // Faster refresh for monitoring
         return () => clearInterval(interval);
     }
   }, [isOpen]);
 
   const refreshStats = async () => {
       setRefreshing(true);
+      
+      // 1. Global Rate Limit
       const currentUsage = await getGlobalUsageStats();
       setGlobalUsage(currentUsage);
       
-      // Fetch total activity count (last 24h)
-      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { count } = await supabase
-        .from('chat_logs')
-        .select('*', { count: 'exact', head: true })
-        .gte('created_at', yesterday);
-      setTotalLogs(count || 0);
-      
+      // 2. Key Status
+      setKeyStatus(getKeyStatus());
+
+      // 3. Activity Logs (Only if on logs tab to save bandwidth)
+      if (activeTab === 'live_logs') {
+          const recentLogs = await getActivityLogs(50);
+          setLogs(recentLogs);
+      }
+
       setRefreshing(false);
   };
 
@@ -60,31 +69,27 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
     setLoading(true);
     setMissingEmailColumn(false);
 
-    // 1. Fetch Users (Use Admin Client to bypass RLS)
+    // 1. Fetch Users
     const { data: profiles, error } = await supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: false });
-    
-    if (error) {
-        console.error("Error fetching profiles:", error);
-    }
-
     if (profiles) {
         setUsers(profiles as UserProfile[]);
-        
-        // Health Check
-        if (profiles.length > 0) {
-            const { error: colError } = await supabase.from('profiles').select('email').limit(1);
-            if (colError && colError.code === '42703') { // Undefined column error code in Postgres
-                setMissingEmailColumn(true);
-            }
-        }
+        // DB Health Check
+        const { error: colError } = await supabase.from('profiles').select('email').limit(1);
+        if (colError && colError.code === '42703') setMissingEmailColumn(true);
     }
 
-    // 2. Fetch Analytics
+    // 2. Fetch Total Activity Count (24h)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count } = await supabase.from('chat_logs').select('*', { count: 'exact', head: true }).gte('created_at', yesterday);
+    setTotalLogs(count || 0);
+
+    // 3. Initial Stats
     await refreshStats();
     
     setLoading(false);
   };
 
+  // --- ACTIONS ---
   const startEdit = (user: UserProfile) => {
     setEditingId(user.id);
     setTempRole(user.role);
@@ -98,68 +103,27 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
   const saveRole = async (userId: string) => {
     setActionLoading(userId);
     try {
-        // Use Admin Client to bypass RLS for role updates
-        const { data, error } = await supabaseAdmin
-            .from('profiles')
-            .update({ role: tempRole })
-            .eq('id', userId)
-            .select();
-
+        const { error } = await supabaseAdmin.from('profiles').update({ role: tempRole }).eq('id', userId);
         if (error) throw error;
-
-        // If no data returned, something weird happened
-        if (!data || data.length === 0) {
-            alert("Update returned no data. Check database permissions.");
-            return;
-        }
-
-        // Update local state
         setUsers(users.map(u => u.id === userId ? { ...u, role: tempRole } : u));
         setEditingId(null);
     } catch (error: any) {
-        console.error("Error updating role:", error);
-        alert(`Failed to update role: ${error.message}`);
+        alert(`Failed: ${error.message}`);
     } finally {
         setActionLoading(null);
     }
   };
 
-  // Step 1: Request Delete
-  const requestDelete = (userId: string) => {
-      setConfirmDeleteId(userId);
-      setEditingId(null); // Close edit mode if open
-  };
-
-  const cancelDelete = () => {
-      setConfirmDeleteId(null);
-  };
-
-  // Step 2: Execute Delete
   const executeDelete = async (userId: string) => {
       setActionLoading(userId);
       try {
-         // --- SUPER ADMIN DELETE (FULL WIPE) ---
-         // 1. Delete Auth User (This is what removes the login)
-         // Cast to any because TS definitions for admin might be missing or different version
-         const { error: authError } = await (supabaseAdmin.auth as any).admin.deleteUser(userId);
-         
-         if (authError) {
-             console.error("Auth delete error:", authError);
-             throw new Error(`Auth Delete Failed: ${authError.message}`);
-         }
-
-         // 2. Delete Data (Bypass RLS)
-         // We do this just in case cascading didn't work, to be sure.
+         await (supabaseAdmin.auth as any).admin.deleteUser(userId);
          await supabaseAdmin.from('chat_logs').delete().eq('user_id', userId);
          await supabaseAdmin.from('profiles').delete().eq('id', userId);
-
-         // Success
          setUsers(users.filter(u => u.id !== userId));
          setConfirmDeleteId(null);
-
       } catch (error: any) {
-          console.error("Error deleting user:", error);
-          alert(`Failed to delete user: ${error.message}.`);
+          alert(`Failed: ${error.message}`);
       } finally {
           setActionLoading(null);
       }
@@ -167,353 +131,284 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
 
   const copyToClipboard = (text: string) => {
       navigator.clipboard.writeText(text);
-      alert("Code copied to clipboard!");
+      alert("Copied!");
   };
 
-  const sqlContent = `-- 1. Enable Cascading Deletes
-ALTER TABLE public.profiles
-DROP CONSTRAINT IF EXISTS profiles_id_fkey,
-ADD CONSTRAINT profiles_id_fkey
-    FOREIGN KEY (id)
-    REFERENCES auth.users (id)
-    ON DELETE CASCADE;`;
-
-  // Calculate usage percentage
   const usagePercentage = Math.min((globalUsage / GLOBAL_LIMIT) * 100, 100);
   const usageColor = usagePercentage > 80 ? 'bg-red-500' : usagePercentage > 50 ? 'bg-yellow-500' : 'bg-green-500';
-  const usageTextColor = usagePercentage > 80 ? 'text-red-400' : usagePercentage > 50 ? 'text-yellow-400' : 'text-green-400';
 
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-md p-0 sm:p-4 animate-fade-in">
       
-      {/* Configuration Modal Overlay */}
+      {/* SQL Config Modal */}
       {showConfig && (
-          <div className="absolute inset-0 z-[110] bg-black/90 flex items-center justify-center p-4 animate-fade-in">
-              <div className="bg-[#0d1117] border border-gray-700 rounded-xl w-full max-w-2xl h-[80vh] flex flex-col shadow-2xl">
-                  <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-[#161b22]">
-                      <div className="flex items-center gap-2">
-                          <Settings className="text-purple-400" size={20} />
-                          <h3 className="font-bold text-gray-200">Backend Setup Guide</h3>
-                      </div>
-                      <button onClick={() => setShowConfig(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
+          <div className="absolute inset-0 z-[110] bg-black/90 flex items-center justify-center p-4">
+              <div className="bg-[#0d1117] border border-gray-700 rounded-xl w-full max-w-lg shadow-2xl">
+                  <div className="p-4 border-b border-gray-800 flex justify-between">
+                      <h3 className="font-bold text-gray-200 flex items-center gap-2"><Database size={16}/> Database Setup</h3>
+                      <button onClick={() => setShowConfig(false)}><X size={20} className="text-gray-400" /></button>
                   </div>
-                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                      <div>
-                          <div className="flex items-center justify-between mb-2">
-                             <h4 className="text-sm font-bold text-blue-400 flex items-center gap-2"><Database size={14}/> SQL Setup</h4>
-                             <button onClick={() => copyToClipboard(sqlContent)} className="text-xs flex items-center gap-1 text-gray-500 hover:text-white"><Copy size={12}/> Copy SQL</button>
-                          </div>
-                          <div className="bg-black/50 border border-gray-800 rounded-lg p-3 overflow-x-auto">
-                              <pre className="text-[10px] sm:text-xs text-green-400 font-mono whitespace-pre">{sqlContent}</pre>
-                          </div>
-                      </div>
+                  <div className="p-4 bg-black/50">
+                      <code className="text-xs text-green-400 font-mono">ALTER TABLE profiles ADD COLUMN IF NOT EXISTS email text;</code>
                   </div>
               </div>
           </div>
       )}
 
-      {/* Main Admin Container */}
-      <div className="bg-[#0d1117] border-t sm:border border-gray-700 rounded-t-xl sm:rounded-xl w-full sm:max-w-5xl h-[100dvh] sm:h-[85vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in relative">
+      {/* Main Container */}
+      <div className="bg-[#0d1117] border-t sm:border border-gray-700 rounded-t-xl sm:rounded-xl w-full sm:max-w-6xl h-[100dvh] sm:h-[90vh] flex flex-col shadow-2xl overflow-hidden relative">
         
-        {/* Header */}
-        <div className="px-4 py-3 md:px-6 md:py-4 border-b border-gray-800 bg-[#161b22] flex items-center justify-between shrink-0 z-30">
+        {/* Top Header */}
+        <div className="px-6 py-4 border-b border-gray-800 bg-[#161b22] flex items-center justify-between shrink-0">
             <div className="flex items-center gap-3">
                 <Shield className="text-red-400" size={20} />
-                <h2 className="text-lg font-bold text-gray-200">Admin Panel</h2>
-                <span className="flex items-center gap-1 text-[10px] bg-green-500/10 text-green-400 px-2 py-0.5 rounded border border-green-500/20 font-mono uppercase">
-                     <ShieldCheck size={10} /> Super Admin
-                </span>
+                <div>
+                    <h2 className="text-lg font-bold text-gray-200 leading-none">Admin Command Center</h2>
+                    <span className="text-[10px] text-gray-500 font-mono uppercase">Super Admin Access</span>
+                </div>
             </div>
             <div className="flex items-center gap-2">
-                <button 
-                    onClick={refreshStats}
-                    className="p-2 text-gray-500 hover:text-blue-400 hover:bg-gray-800 rounded-lg transition-colors"
-                    title="Refresh Data"
-                >
-                    <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
-                </button>
-                <button 
-                    onClick={() => setShowConfig(true)}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/30 hover:bg-purple-500/20 text-xs font-medium transition-colors"
-                >
-                    <Settings size={14} />
-                    <span className="hidden sm:inline">Backend</span>
-                </button>
-                <div className="w-px h-4 bg-gray-700 mx-1"></div>
-                <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors p-2 hover:bg-gray-800 rounded-lg"><X size={24} /></button>
+                 <button onClick={refreshStats} className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg">
+                    <RefreshCw size={18} className={refreshing ? "animate-spin" : ""} />
+                 </button>
+                 <div className="w-px h-6 bg-gray-700 mx-2"></div>
+                 <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg"><X size={20} /></button>
             </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar bg-[#0d1117] relative">
+        {/* Tab Navigation */}
+        <div className="flex border-b border-gray-800 bg-[#0d1117]">
+            <button 
+                onClick={() => setActiveTab('overview')}
+                className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 border-b-2 transition-colors ${activeTab === 'overview' ? 'border-blue-500 text-blue-400 bg-[#161b22]' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+            >
+                <Users size={14} /> User Database
+            </button>
+            <button 
+                onClick={() => setActiveTab('api_health')}
+                className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 border-b-2 transition-colors ${activeTab === 'api_health' ? 'border-purple-500 text-purple-400 bg-[#161b22]' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+            >
+                <Server size={14} /> API Monitor
+            </button>
+            <button 
+                onClick={() => setActiveTab('live_logs')}
+                className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 border-b-2 transition-colors ${activeTab === 'live_logs' ? 'border-green-500 text-green-400 bg-[#161b22]' : 'border-transparent text-gray-500 hover:text-gray-300'}`}
+            >
+                <List size={14} /> Live Traffic
+            </button>
+        </div>
+
+        {/* TAB CONTENT AREA */}
+        <div className="flex-1 overflow-hidden bg-[#0d1117] relative">
             
-            {/* Stats Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 border-b border-gray-800 bg-[#0d1117]">
-                <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
-                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1 flex items-center gap-2">
-                        <Users size={12} /> Total Users
-                    </div>
-                    <div className="text-lg md:text-2xl font-bold text-white">{users.length}</div>
-                </div>
-                
-                <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
-                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1 flex items-center gap-2">
-                        <Activity size={12} /> 24h Activity
-                    </div>
-                    <div className="text-lg md:text-2xl font-bold text-blue-400">{totalLogs}</div>
-                </div>
-
-                {/* Real-time Rate Limit Card */}
-                 <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800 relative overflow-hidden group">
-                    <div className="flex justify-between items-center mb-1 relative z-10">
-                        <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase flex items-center gap-2">
-                             <Zap size={12} className={usagePercentage > 80 ? "text-red-500" : "text-yellow-500"} /> Global Load
+            {/* TAB 1: OVERVIEW (USERS) */}
+            {activeTab === 'overview' && (
+                <div className="h-full flex flex-col">
+                     {/* Stats Bar */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-6 border-b border-gray-800 bg-[#0d1117]">
+                        <div className="bg-[#161b22] p-4 rounded-xl border border-gray-800 flex flex-col">
+                            <span className="text-gray-500 text-[10px] font-bold uppercase mb-1 flex items-center gap-2"><Users size={12} /> Total Users</span>
+                            <span className="text-2xl font-bold text-white">{users.length}</span>
                         </div>
-                        <span className="text-[9px] text-gray-500 font-mono">1m window</span>
-                    </div>
-                    
-                    <div className={`text-lg md:text-2xl font-bold relative z-10 ${usageTextColor}`}>
-                        {globalUsage} <span className="text-sm text-gray-600 font-normal">/ {GLOBAL_LIMIT}</span>
-                    </div>
-                    
-                    {/* Progress Bar Background */}
-                    <div className="absolute bottom-0 left-0 h-1 bg-gray-700 w-full">
-                        <div 
-                            className={`h-full ${usageColor} transition-all duration-500 ease-out`} 
-                            style={{ width: `${usagePercentage}%` }}
-                        ></div>
-                    </div>
-                </div>
-
-                 <div className="bg-[#161b22] p-3 rounded-lg border border-gray-800">
-                    <div className="text-gray-500 text-[10px] md:text-xs font-bold uppercase mb-1 flex items-center gap-2">
-                        <BarChart3 size={12} /> System Status
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                        <div className={`w-2.5 h-2.5 rounded-full ${usagePercentage >= 100 ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`}></div>
-                        <div className={`text-xs md:text-sm font-bold ${usagePercentage >= 100 ? 'text-red-400' : 'text-green-400'}`}>
-                            {usagePercentage >= 100 ? 'OVERLOAD' : 'OPERATIONAL'}
+                        <div className="bg-[#161b22] p-4 rounded-xl border border-gray-800 flex flex-col">
+                            <span className="text-gray-500 text-[10px] font-bold uppercase mb-1 flex items-center gap-2"><Activity size={12} /> 24h Requests</span>
+                            <span className="text-2xl font-bold text-blue-400">{totalLogs}</span>
+                        </div>
+                        <div className="bg-[#161b22] p-4 rounded-xl border border-gray-800 flex flex-col relative overflow-hidden">
+                             <span className="text-gray-500 text-[10px] font-bold uppercase mb-1 flex items-center gap-2 z-10 relative"><Zap size={12} /> Global Load</span>
+                             <span className="text-2xl font-bold text-white z-10 relative">{globalUsage} <span className="text-sm text-gray-500 font-normal">/ {GLOBAL_LIMIT} RPM</span></span>
+                             <div className="absolute bottom-0 left-0 w-full h-1 bg-gray-700">
+                                 <div className={`h-full ${usageColor} transition-all duration-500`} style={{ width: `${usagePercentage}%` }}></div>
+                             </div>
+                        </div>
+                        <div className="bg-[#161b22] p-4 rounded-xl border border-gray-800 flex flex-col">
+                             <span className="text-gray-500 text-[10px] font-bold uppercase mb-1 flex items-center gap-2"><Database size={12} /> DB Status</span>
+                             <div className="flex items-center gap-2 mt-1">
+                                 <div className={`w-2 h-2 rounded-full ${missingEmailColumn ? 'bg-red-500' : 'bg-green-500'}`}></div>
+                                 <span className={`text-sm font-bold ${missingEmailColumn ? 'text-red-400' : 'text-green-400'}`}>{missingEmailColumn ? 'Schema Error' : 'Healthy'}</span>
+                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
 
-            {/* Content Body */}
-            <div className="p-3 sm:p-6 pb-20 sm:pb-6">
-                
-                {/* Missing Column Warning */}
-                {missingEmailColumn && (
-                    <div className="mb-6 bg-red-500/10 border border-red-500/30 rounded-lg p-4 flex flex-col sm:flex-row gap-4 animate-fade-in">
-                        <div className="p-2 bg-red-500/20 rounded-full h-fit w-fit shrink-0">
-                            <Database className="text-red-400" size={20} />
-                        </div>
-                        <div className="flex-1">
-                            <h3 className="text-sm font-bold text-white mb-1">Missing Database Column: email</h3>
-                            <p className="text-xs text-gray-400 mb-3 leading-relaxed">
-                                The <code>email</code> column is missing from your <code>profiles</code> table. 
-                                User emails cannot be saved or displayed until this is fixed.
-                            </p>
-                            <div className="bg-black/50 rounded-md border border-red-500/20 p-3 flex items-center justify-between gap-3 group">
-                                <code className="text-[10px] sm:text-xs font-mono text-red-300 break-all">
-                                    ALTER TABLE profiles ADD COLUMN IF NOT EXISTS email text;
-                                </code>
-                                <button 
-                                    onClick={() => copyToClipboard("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS email text;")}
-                                    className="p-1.5 hover:bg-white/10 rounded-md text-gray-400 hover:text-white transition-colors"
-                                    title="Copy SQL"
-                                >
-                                    <Copy size={14} />
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Search Bar */}
-                <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <h3 className="text-white font-semibold hidden sm:block">User Database</h3>
-                    <div className="relative w-full sm:w-auto">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
-                        <input type="text" placeholder="Search users..." className="bg-[#161b22] border border-gray-700 rounded-md py-2 pl-9 pr-3 text-xs text-gray-300 focus:border-blue-500 outline-none w-full sm:w-64" />
-                    </div>
-                </div>
-
-                {/* Table - FIXED LAYOUT (Prevents overflow) */}
-                <div className="border border-gray-800 rounded-lg overflow-hidden bg-[#161b22]">
-                    <table className="w-full text-left border-collapse table-fixed">
-                        {/* Sticky Header */}
-                        <thead className="sticky top-0 z-20 shadow-md">
-                            <tr className="border-b border-gray-800 bg-[#161b22] text-gray-500 text-xs uppercase shadow-sm">
-                                {/* User takes remaining space */}
-                                <th className="py-3 px-2 sm:px-4 font-medium bg-[#161b22] w-auto">User</th>
-                                {/* Role fixed width */}
-                                <th className="py-3 px-1 sm:px-4 font-medium bg-[#161b22] w-[75px] sm:w-[120px] text-center sm:text-left">Role</th>
-                                {/* Hidden on mobile */}
-                                <th className="py-3 px-4 font-medium bg-[#161b22] hidden md:table-cell w-[120px]">Joined</th>
-                                {/* Action fixed width - Increased for delete confirm */}
-                                <th className="py-3 px-2 sm:px-4 font-medium text-right bg-[#161b22] w-[120px]">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody className="text-sm text-gray-300 bg-[#0d1117]">
-                            {loading ? (
-                                <tr>
-                                    <td colSpan={4} className="py-8 text-center text-gray-500">
-                                        <Loader2 className="mx-auto animate-spin mb-2" size={24} />
-                                        Loading users...
-                                    </td>
-                                </tr>
-                            ) : users.length === 0 ? (
-                                <tr>
-                                    <td colSpan={4} className="py-8 text-center text-gray-500">No users found.</td>
-                                </tr>
-                            ) : (
-                                users.map(u => {
-                                    const displayEmail = (u.id === session?.user.id ? session.user.email : u.email) || null;
-                                    const isEditing = editingId === u.id;
-                                    const isDeleting = confirmDeleteId === u.id;
-                                    const isLoadingAction = actionLoading === u.id;
-
-                                    return (
-                                    <tr key={u.id} className="border-b border-gray-800/50 hover:bg-[#161b22]/50 transition-colors group">
-                                        
-                                        {/* USER INFO */}
-                                        <td className="py-3 px-2 sm:px-4">
-                                            <div className="flex items-center gap-2 sm:gap-3">
-                                                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-700 overflow-hidden shrink-0 border border-gray-600">
-                                                    {u.avatar_url ? <img src={u.avatar_url} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-xs font-bold text-gray-400">{u.username?.[0]?.toUpperCase()}</div>}
-                                                </div>
-                                                <div className="min-w-0 flex-1">
-                                                    <div className="font-medium text-white truncate text-xs sm:text-sm">{u.username}</div>
-                                                    
-                                                    {displayEmail ? (
-                                                        <div className="text-[10px] sm:text-xs text-gray-500 truncate select-all" title={displayEmail}>
-                                                            {displayEmail}
-                                                        </div>
-                                                    ) : (
-                                                        <div className="flex flex-col mt-0.5">
-                                                            <div className="flex items-center gap-1">
-                                                                <span className="text-[10px] text-gray-600 italic">No email recorded</span>
-                                                                {!missingEmailColumn && (
-                                                                    <div className="group relative">
-                                                                        <AlertCircle size={10} className="text-gray-700 cursor-help" />
-                                                                        <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 w-48 bg-black border border-gray-700 p-2 rounded text-[10px] text-gray-300 hidden group-hover:block z-50">
-                                                                            Email data missing. User might need to login again to sync.
-                                                                        </div>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                            {missingEmailColumn && (
-                                                                <span className="text-[9px] text-red-400/80 font-mono mt-0.5 flex items-center gap-1">
-                                                                    <Terminal size={8} /> DB Schema Error
-                                                                </span>
-                                                            )}
-                                                            <span className="text-[9px] text-gray-700 font-mono truncate" title={`UID: ${u.id}`}>ID: {u.id.substring(0,8)}...</span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </td>
-
-                                        {/* ROLE */}
-                                        <td className="py-3 px-1 sm:px-4 text-center sm:text-left">
-                                            {isEditing ? (
-                                                <select 
-                                                    value={tempRole}
-                                                    onChange={(e) => setTempRole(e.target.value as 'user' | 'admin')}
-                                                    className="w-full bg-[#0d1117] border border-gray-700 text-white text-[10px] sm:text-xs rounded px-1 py-1 outline-none focus:border-blue-500"
-                                                    disabled={isLoadingAction}
-                                                >
-                                                    <option value="user">User</option>
-                                                    <option value="admin">Admin</option>
-                                                </select>
-                                            ) : (
-                                                <span className={`px-1.5 py-0.5 rounded text-[10px] sm:text-xs font-medium border uppercase tracking-wider block w-fit sm:inline mx-auto sm:mx-0 ${u.role === 'admin' ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`}>
-                                                    {u.role}
-                                                </span>
-                                            )}
-                                        </td>
-
-                                        {/* JOINED */}
-                                        <td className="py-3 px-4 text-gray-500 font-mono text-xs hidden md:table-cell">
-                                            {new Date().toLocaleDateString()}
-                                        </td>
-
-                                        {/* ACTION AREA */}
-                                        <td className="py-3 px-2 sm:px-4 text-right">
-                                            {isDeleting ? (
-                                                // CONFIRMATION UI
-                                                <div className="flex items-center justify-end gap-2 animate-fade-in">
-                                                    <span className="text-[10px] font-bold hidden sm:inline text-red-400">
-                                                        Wipe User?
-                                                    </span>
-                                                    <button 
-                                                        onClick={() => executeDelete(u.id)}
-                                                        disabled={isLoadingAction}
-                                                        className={`p-1.5 rounded border transition-all bg-red-600 hover:bg-red-500 text-white border-red-500`}
-                                                        title="Confirm Delete"
-                                                    >
-                                                        {isLoadingAction ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
-                                                    </button>
-                                                    <button 
-                                                        onClick={cancelDelete}
-                                                        disabled={isLoadingAction}
-                                                        className="p-1.5 bg-gray-800 text-gray-400 hover:text-white rounded border border-gray-700 transition-all"
-                                                        title="Cancel"
-                                                    >
-                                                        <X size={14} />
-                                                    </button>
-                                                </div>
-                                            ) : isEditing ? (
-                                                // EDIT UI
-                                                <div className="flex items-center justify-end gap-1 sm:gap-2">
-                                                    <button 
-                                                        onClick={() => saveRole(u.id)}
-                                                        disabled={isLoadingAction}
-                                                        className="p-1.5 text-green-400 hover:bg-green-400/10 rounded transition-all"
-                                                    >
-                                                        {isLoadingAction ? <Loader2 size={14} className="animate-spin"/> : <Check size={14} />}
-                                                    </button>
-                                                    <button 
-                                                        onClick={cancelEdit}
-                                                        disabled={isLoadingAction}
-                                                        className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-all"
-                                                    >
-                                                        <X size={14} />
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                // DEFAULT ACTION UI
-                                                <div className="flex items-center justify-end gap-1 sm:gap-2">
-                                                    <button 
-                                                        onClick={() => startEdit(u)}
-                                                        className="p-1.5 text-blue-400 hover:bg-blue-400/10 rounded opacity-60 hover:opacity-100 transition-all"
-                                                        title="Edit Role"
-                                                    >
-                                                        <Edit2 size={14} />
-                                                    </button>
-                                                    
-                                                    {/* Delete Button Container with Tooltip info */}
-                                                    <div className="relative group/tip">
-                                                        <button 
-                                                            onClick={() => requestDelete(u.id)}
-                                                            className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded opacity-60 hover:opacity-100 transition-all"
-                                                            title="Delete User"
-                                                        >
-                                                            <Trash2 size={14} />
-                                                        </button>
+                    {/* Table */}
+                    <div className="flex-1 overflow-y-auto p-6">
+                        <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden">
+                            <table className="w-full text-left border-collapse">
+                                <thead className="bg-[#0f131a] text-gray-500 text-xs uppercase sticky top-0 z-10">
+                                    <tr>
+                                        <th className="py-3 px-4 font-semibold">User Identity</th>
+                                        <th className="py-3 px-4 font-semibold">Access Level</th>
+                                        <th className="py-3 px-4 font-semibold text-right">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-800/50">
+                                    {loading ? (
+                                        <tr><td colSpan={3} className="py-8 text-center text-gray-500"><Loader2 className="mx-auto animate-spin mb-2"/>Loading users...</td></tr>
+                                    ) : users.map(u => (
+                                        <tr key={u.id} className="hover:bg-[#1c2128] transition-colors group">
+                                            <td className="py-3 px-4">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-xs font-bold text-white overflow-hidden">
+                                                        {u.avatar_url ? <img src={u.avatar_url} className="w-full h-full object-cover"/> : u.username?.[0]}
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-sm font-medium text-white">{u.username}</div>
+                                                        <div className="text-xs text-gray-500 font-mono">{u.email || 'No email synced'}</div>
                                                     </div>
                                                 </div>
-                                            )}
+                                            </td>
+                                            <td className="py-3 px-4">
+                                                {editingId === u.id ? (
+                                                    <select value={tempRole} onChange={e => setTempRole(e.target.value as any)} className="bg-[#0d1117] border border-gray-700 text-xs rounded px-2 py-1 text-white">
+                                                        <option value="user">User</option>
+                                                        <option value="admin">Admin</option>
+                                                    </select>
+                                                ) : (
+                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${u.role === 'admin' ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`}>
+                                                        {u.role}
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="py-3 px-4 text-right">
+                                                {confirmDeleteId === u.id ? (
+                                                    <div className="flex items-center justify-end gap-2">
+                                                        <button onClick={() => executeDelete(u.id)} className="text-red-400 hover:text-red-300 bg-red-900/20 px-2 py-1 rounded text-xs">Confirm</button>
+                                                        <button onClick={() => setConfirmDeleteId(null)} className="text-gray-400 hover:text-white px-2 py-1">Cancel</button>
+                                                    </div>
+                                                ) : editingId === u.id ? (
+                                                     <div className="flex items-center justify-end gap-2">
+                                                        <button onClick={() => saveRole(u.id)} className="text-green-400 hover:text-green-300"><Check size={16}/></button>
+                                                        <button onClick={cancelEdit} className="text-gray-400 hover:text-white"><X size={16}/></button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center justify-end gap-2 opacity-60 group-hover:opacity-100">
+                                                        <button onClick={() => startEdit(u)} className="p-1.5 hover:bg-gray-700 rounded text-blue-400"><Edit2 size={14}/></button>
+                                                        <button onClick={() => setConfirmDeleteId(u.id)} className="p-1.5 hover:bg-gray-700 rounded text-gray-500 hover:text-red-400"><Trash2 size={14}/></button>
+                                                    </div>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* TAB 2: API MONITOR */}
+            {activeTab === 'api_health' && (
+                <div className="h-full overflow-y-auto p-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+                        {/* Summary Card */}
+                        <div className="col-span-1 md:col-span-2 lg:col-span-3 bg-gradient-to-r from-purple-900/20 to-blue-900/20 border border-purple-500/30 rounded-xl p-6">
+                            <h3 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
+                                <Server className="text-purple-400" /> Key Pool Architecture
+                            </h3>
+                            <p className="text-sm text-gray-400 mb-4">
+                                The system utilizes a Round-Robin rotation strategy with {keyStatus.length} API keys. 
+                                This distributes load to prevent single-key exhaustion and increases global RPM capacity.
+                            </p>
+                            <div className="flex gap-8">
+                                <div>
+                                    <div className="text-2xl font-bold text-white">{keyStatus.length * 15}</div>
+                                    <div className="text-xs text-gray-500 uppercase font-bold">Est. Max RPM</div>
+                                </div>
+                                <div>
+                                    <div className="text-2xl font-bold text-green-400">{keyStatus.filter(k => k.status === 'operational').length}</div>
+                                    <div className="text-xs text-gray-500 uppercase font-bold">Healthy Keys</div>
+                                </div>
+                                <div>
+                                    <div className="text-2xl font-bold text-yellow-400">{keyStatus.filter(k => k.status === 'limited').length}</div>
+                                    <div className="text-xs text-gray-500 uppercase font-bold">Rate Limited</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Individual Key Cards */}
+                        {keyStatus.map((k) => (
+                            <div key={k.index} className={`bg-[#161b22] border rounded-xl p-4 flex flex-col gap-3 relative overflow-hidden transition-all ${k.status === 'operational' ? 'border-gray-800' : k.status === 'limited' ? 'border-yellow-500/50 shadow-[0_0_15px_rgba(234,179,8,0.1)]' : 'border-red-500/50'}`}>
+                                <div className="flex justify-between items-start z-10">
+                                    <div className="flex items-center gap-2">
+                                        <div className={`p-1.5 rounded-md ${k.status === 'operational' ? 'bg-green-500/10 text-green-400' : k.status === 'limited' ? 'bg-yellow-500/10 text-yellow-400' : 'bg-red-500/10 text-red-400'}`}>
+                                            <Key size={16} />
+                                        </div>
+                                        <div>
+                                            <div className="text-sm font-bold text-gray-200">Key Slot #{k.index + 1}</div>
+                                            <div className="text-xs font-mono text-gray-500">{k.key}</div>
+                                        </div>
+                                    </div>
+                                    <div className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase border ${k.status === 'operational' ? 'bg-green-500/10 text-green-400 border-green-500/20' : k.status === 'limited' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
+                                        {k.status}
+                                    </div>
+                                </div>
+                                
+                                <div className="space-y-2 mt-2 z-10">
+                                    <div className="flex justify-between text-xs text-gray-400">
+                                        <span>Last Used:</span>
+                                        <span className="text-gray-300">{k.lastUsed ? new Date(k.lastUsed).toLocaleTimeString() : 'Idle'}</span>
+                                    </div>
+                                    <div className="flex justify-between text-xs text-gray-400">
+                                        <span>Errors (Session):</span>
+                                        <span className={k.errors > 0 ? "text-red-400" : "text-gray-300"}>{k.errors}</span>
+                                    </div>
+                                </div>
+
+                                {/* Background Pulse for busy keys */}
+                                {k.status === 'limited' && <div className="absolute inset-0 bg-yellow-500/5 animate-pulse z-0"></div>}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* TAB 3: LIVE TRAFFIC LOGS */}
+            {activeTab === 'live_logs' && (
+                <div className="h-full flex flex-col">
+                    <div className="p-4 bg-[#161b22] border-b border-gray-800 flex justify-between items-center">
+                        <div className="text-sm text-gray-400">
+                            Showing last <span className="text-white font-bold">50</span> requests. Refreshes automatically.
+                        </div>
+                        <button onClick={refreshStats} className="text-xs bg-gray-800 hover:bg-gray-700 text-white px-3 py-1.5 rounded border border-gray-700">Force Refresh</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-0">
+                        <table className="w-full text-left border-collapse">
+                            <thead className="bg-[#0f131a] text-gray-500 text-xs uppercase sticky top-0 z-10 shadow-sm">
+                                <tr>
+                                    <th className="py-2 px-4 w-32">Time</th>
+                                    <th className="py-2 px-4">User</th>
+                                    <th className="py-2 px-4">Action</th>
+                                    <th className="py-2 px-4 text-right">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-800/50 font-mono text-xs">
+                                {logs.length === 0 ? (
+                                     <tr><td colSpan={4} className="py-12 text-center text-gray-500 italic">No recent traffic logs found.</td></tr>
+                                ) : logs.map((log) => (
+                                    <tr key={log.id} className="hover:bg-[#1c2128]">
+                                        <td className="py-2 px-4 text-gray-400">
+                                            {new Date(log.created_at).toLocaleTimeString()}
+                                        </td>
+                                        <td className="py-2 px-4">
+                                            <div className="text-blue-400">{log.user?.email || 'Unknown'}</div>
+                                            <div className="text-[10px] text-gray-600">{log.user?.username}</div>
+                                        </td>
+                                        <td className="py-2 px-4 text-gray-300">
+                                            CHAT_COMPLETION
+                                        </td>
+                                        <td className="py-2 px-4 text-right">
+                                            <span className="text-green-400">SUCCESS</span>
                                         </td>
                                     </tr>
-                                )})
-                            )}
-                        </tbody>
-                    </table>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
+            )}
+
         </div>
       </div>
     </div>
