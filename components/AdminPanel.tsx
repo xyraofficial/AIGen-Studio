@@ -60,8 +60,8 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
     setLoading(true);
     setMissingEmailColumn(false);
 
-    // 1. Fetch Users
-    const { data: profiles, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
+    // 1. Fetch Users (Use Admin Client to bypass RLS)
+    const { data: profiles, error } = await supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: false });
     
     if (error) {
         console.error("Error fetching profiles:", error);
