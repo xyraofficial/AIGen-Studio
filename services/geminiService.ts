@@ -1,58 +1,117 @@
+
 import { GoogleGenAI, Chat, GenerateContentResponse } from "@google/genai";
+
+// Pool of API keys for rotation and fallback
+const API_KEYS = [
+  "AIzaSyC2tVIDKMLP3pZgwhLLUXVxqQXZRmlGW5o",
+  "AIzaSyB6KGkg2a9bggeoLp9S36kacBJtZBZKyCc",
+  "AIzaSyAJDk1xyqT6XgUl3KpMzpoaQHjGnPw7hQM",
+  "AIzaSyC5V3qs13daQw9xr8HSL48LC1XTvjcfMnM"
+];
+
+// Helper to safely get an environment variable or fallback to the pool
+const getApiKey = (index: number): string => {
+  // Try process.env first (if configured in Vite/Cloudflare)
+  if (typeof process !== 'undefined' && process.env?.API_KEY) {
+    return process.env.API_KEY;
+  }
+  // Fallback to the hardcoded pool
+  return API_KEYS[index % API_KEYS.length];
+};
+
+/**
+ * Helper to determine if an error is a rate limit or capacity issue
+ */
+function isRetryableError(error: any): boolean {
+  const msg = error?.message?.toLowerCase() || '';
+  const status = error?.status || error?.response?.status;
+  
+  return (
+    status === 429 || // Too Many Requests
+    status === 503 || // Service Unavailable
+    msg.includes('resource exhausted') ||
+    msg.includes('quota') ||
+    msg.includes('overloaded') ||
+    msg.includes('too many requests')
+  );
+}
 
 /**
  * Creates a chat session and returns a generator for streaming responses.
+ * Implements Key Rotation Logic.
  */
 export const streamChatResponse = async function* (
   modelId: string,
   history: { role: string; content: string; isError?: boolean }[],
   newMessage: string
 ) {
-  // Per guidelines: The API key must be obtained exclusively from process.env.API_KEY
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  let lastError: any;
 
-  // Filter out error messages from history
-  const validHistory = history
-    .filter(msg => !msg.isError && msg.content.trim() !== '')
-    .map(msg => ({
-      role: msg.role,
-      parts: [{ text: msg.content }]
-    }));
+  // Try each key in the pool until one works
+  for (let i = 0; i < API_KEYS.length; i++) {
+    const currentKey = getApiKey(i);
+    
+    try {
+      const ai = new GoogleGenAI({ apiKey: currentKey });
 
-  const chat: Chat = ai.chats.create({
-    model: modelId,
-    history: validHistory,
-    config: {
-      temperature: 0.7,
-      maxOutputTokens: 1000,
-      systemInstruction: "You are an expert developer assistant. When asked for code or scripts (especially Bash/Shell), provide the full, clean, executable code in a single block first. Use automation flags (e.g. -y) where possible. Always format code blocks with the correct language tag. Ensure there is a newline before and after the code block content.\nDo not produce malformed markdown.",
-      tools: [{ googleSearch: {} }],
+      // Filter out error messages from history
+      const validHistory = history
+        .filter(msg => !msg.isError && msg.content.trim() !== '')
+        .map(msg => ({
+          role: msg.role,
+          parts: [{ text: msg.content }]
+        }));
+
+      const chat: Chat = ai.chats.create({
+        model: modelId,
+        history: validHistory,
+        config: {
+          temperature: 0.7,
+          maxOutputTokens: 1000,
+          systemInstruction: "You are an expert developer assistant. When asked for code or scripts (especially Bash/Shell), provide the full, clean, executable code in a single block first. Use automation flags (e.g. -y) where possible. Always format code blocks with the correct language tag. Ensure there is a newline before and after the code block content.\nDo not produce malformed markdown.",
+          tools: [{ googleSearch: {} }],
+        }
+      });
+
+      const result = await chat.sendMessageStream({ message: newMessage });
+
+      // Stream content.
+      for await (const chunk of result) {
+        const c = chunk as GenerateContentResponse;
+        yield {
+          text: c.text || '',
+          groundingMetadata: c.candidates?.[0]?.groundingMetadata
+        };
+      }
+
+      return; // Success, exit the loop
+
+    } catch (error: any) {
+      lastError = error;
+      
+      // Only retry if it's a rate limit issue
+      if (isRetryableError(error)) {
+        console.warn(`Key ${i + 1}/${API_KEYS.length} exhausted. Switching to next key...`);
+        continue;
+      }
+      
+      // If it's a different error (e.g., bad request), throw immediately
+      throw error;
     }
-  });
-
-  const result = await chat.sendMessageStream({ message: newMessage });
-
-  // Stream content.
-  for await (const chunk of result) {
-    const c = chunk as GenerateContentResponse;
-    yield {
-      text: c.text || '',
-      groundingMetadata: c.candidates?.[0]?.groundingMetadata
-    };
   }
+
+  throw new Error(`System Busy: All AI resources are currently overloaded. (${lastError?.message || 'Unknown error'})`);
 };
 
 /**
  * Generates content for the Builder mode (Script generation) with streaming.
+ * Implements Key Rotation Logic.
  */
 export const streamBuilderResponse = async function* (
   modelId: string,
   prompt: string,
   format: 'markdown' | 'json' | 'text' = 'markdown'
 ) {
-  // Per guidelines: The API key must be obtained exclusively from process.env.API_KEY
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
   let formatInstruction = "";
   switch (format) {
     case 'json':
@@ -75,20 +134,44 @@ export const streamBuilderResponse = async function* (
     4. ACCURACY: Ensure correct syntax.
     `;
 
-  const result = await ai.models.generateContentStream({
-    model: modelId,
-    contents: prompt,
-    config: {
-      systemInstruction: systemInstruction,
-      temperature: 0.2, 
-      maxOutputTokens: 4000, 
-    }
-  });
+  let lastError: any;
 
-  for await (const chunk of result) {
-      const c = chunk as GenerateContentResponse;
-      if (c.text) {
-        yield c.text;
+  // Try each key in the pool
+  for (let i = 0; i < API_KEYS.length; i++) {
+    const currentKey = getApiKey(i);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey: currentKey });
+
+      const result = await ai.models.generateContentStream({
+        model: modelId,
+        contents: prompt,
+        config: {
+          systemInstruction: systemInstruction,
+          temperature: 0.2, 
+          maxOutputTokens: 4000, 
+        }
+      });
+
+      for await (const chunk of result) {
+          const c = chunk as GenerateContentResponse;
+          if (c.text) {
+            yield c.text;
+          }
       }
+
+      return; // Success
+
+    } catch (error: any) {
+      lastError = error;
+
+      if (isRetryableError(error)) {
+        console.warn(`Builder: Key ${i + 1}/${API_KEYS.length} exhausted. Switching...`);
+        continue; 
+      }
+      throw error;
+    }
   }
+
+  throw new Error(`System Busy: All AI resources are exhausted. (${lastError?.message})`);
 };
