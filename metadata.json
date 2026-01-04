@@ -1,0 +1,5 @@
+{
+  "name": "GenAI Studio",
+  "description": "A powerful dual-mode application featuring an interactive AI Chat and a specialized AI Script Builder. Supports multiple Gemini models for tailored content generation.",
+  "requestFramePermissions": []
+}
